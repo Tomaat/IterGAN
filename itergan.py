@@ -120,13 +120,17 @@ def _build_parser():
     return parser
 
 
-a = None  # the parsed arguments, after calling main()
+if __name__ == '__main__':
+    args = _build_parser().parse_args()
+else:
+    args = None
 epoch_ = None
 
 EPS = default.EPS
 OBJECT_QUEUE = None
-# KINDS = ['inputs', 'outputs', 'targets', 'difference', 'between']
-KINDS = ['difference', 'between']
+KINDS = ['inputs', 'outputs', 'targets', 'difference', 'between']
+# KINDS = ['difference', 'between']
+# KINDS = []
 
 Examples = collections.namedtuple('Examples', 'paths, inputs, targets, count,'
                                   ' steps_per_epoch, iters, target_masks,'
@@ -143,8 +147,10 @@ DATA_FILE = '{dir}/img/{id}/{id}_r{rot}.png'
 MASK_FILE = '{dir}/mask/{id}/{id}_r{rot}.png'
 
 
-def get_generator(name):
+def get_generator(name, max_epochs):
     """Get an iterator to construct the necessary input files"""
+    vkitti_max = {1: 447, 2: 233, 6: 270, 18: 339, 20: 837}
+
     def basic_train(r=6):
         yield from ((id, x, r) for x in range(0, 72, 2)
                     for id in range(1, 801))
@@ -155,8 +161,20 @@ def get_generator(name):
         yield from ((id, x, r) for id in range(801, 901)
                     for x in range(1, 72, 2))
 
+    def vkitti_train():
+        for scene in [1, 6, 18, 20]:
+            for id in range(vkitti_max[scene]):
+                for x in [0, 3, 6]:
+                    if scene == 20 and id % 5 == 0 and x == 0:
+                        continue
+                    yield (scene*1000+id, x, 6)
+
+    def vkitti_test_seen():
+        for id in range(0, vkitti_max[20], 5):
+            yield (20000+id, 0, 6)
+
     def step_wise_train():
-        t = a.max_epochs // 4
+        t = max_epochs // 4
         subs = [(1,)]*t + [(1, 2)]*t + [(1, 2, 3, 4, 5, 6)]*t + \
             [range(1, 37)]*(t+1)
         for rng in subs:
@@ -188,11 +206,13 @@ def get_generator(name):
         'varied_rot_train': (cycle(varied_rot_train()), 28836),
         'very_small': (cycle(very_small()), 8),
         'very_small_test': (cycle(very_small_test()), 8),
+        'vkitti_train': (cycle(vkitti_train()), 5511),
+        'vkitti_test_seen': (cycle(vkitti_test_seen()), 168),
     }[name]
 
 
 # ==== Default ops
-def preprocess(raw, mask=False, name='preprocess'):
+def preprocess(raw, mask=False, *, name='preprocess'):
     """From raw data, create a tensor of correct shape and dtype."""
     with tf.name_scope(name):
         raw = tf.image.convert_image_dtype(raw, dtype=tf.float32)
@@ -201,13 +221,14 @@ def preprocess(raw, mask=False, name='preprocess'):
         return raw
 
 
-def deprocess(image):
+def deprocess(image, *, name='deprocess'):
     """Change the range of an image from [-1, 1] to [0, 1]"""
-    with tf.name_scope('deprocess'):
+    with tf.name_scope(name):
         return (image + 1) / 2
 
 
-def conv(batch_input, out_channels, stride):
+def conv(batch_input, out_channels, stride, *, init='normal', use_bias=False,
+         name='conv'):
     """create tensorflow convolutions
 
     * Does not use a bias, as in the original lua code of pix2pix
@@ -220,15 +241,17 @@ def conv(batch_input, out_channels, stride):
         The number of channels in the output image
     stride - int
         The stride of the filter
+    name (kwarg) - string
+        The variable-scope of these ops (default 'conv')
 
     Returns
     -------
     np.tensor - The tensor after convolution
     """
-    with tf.variable_scope('conv'):
-        if a.init == 'xavier':
+    with tf.variable_scope(name):
+        if init == 'xavier':
             initial = CONV_INIT_XAVIER
-        elif a.init == 'small':
+        elif init == 'small':
             initial = tf.random_normal_initializer(default.CONV_INIT_MU,
                                                    default.CONV_INIT_STD_SMALL)
         else:
@@ -247,7 +270,7 @@ def conv(batch_input, out_channels, stride):
                               mode='CONSTANT')
         conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1],
                             padding='VALID')
-        if a.use_bias:
+        if use_bias:
             biases = tf.get_variable('biases', [out_channels],
                                      initializer=default.CONV_BIAS_INIT)
             conv = tf.reshape(tf.nn.bias_add(conv, biases), conv.get_shape())
@@ -255,7 +278,7 @@ def conv(batch_input, out_channels, stride):
         return conv
 
 
-def lrelu(x, a):
+def lrelu(x, a, *, name='lrelu'):
     """Implementation of Leaky ReLU
 
     Arguments
@@ -264,30 +287,34 @@ def lrelu(x, a):
         The input tensor
     a - float
         The alpha parameter of the Leaky ReLU
+    name (kwarg) - string
+        The variable-scope of these ops (default 'lrelu')
 
     Returns
     -------
     tf.tensor - The tensor after the relu
     """
-    with tf.name_scope('lrelu'):
+    with tf.name_scope(name):
         # this block looks like it has 2 inputs on the graph unless we do this
         x = tf.identity(x)
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
 
 
-def batchnorm(input):
+def batchnorm(input, *, name='batchnorm'):
     """Performs instance normalisation using the tf.nn.batch_normalization
 
     Arguments
     ---------
     input - tf.tensor
         The input tensor
+    name (kwarg)- string
+        The variable-scope of these ops (default 'batchnorm')
 
     Returns
     -------
     tf.tensor - the normalised output
     """
-    with tf.variable_scope('batchnorm'):
+    with tf.variable_scope(name):
         # this block looks like it has 3 inputs on the graph unless we do this
         input = tf.identity(input)
 
@@ -304,7 +331,8 @@ def batchnorm(input):
         return normalized
 
 
-def deconv(batch_input, out_channels):
+def deconv(batch_input, out_channels, *, init='normal', use_bias=False,
+           name='deconv'):
     """Create transposed_convolution aka deconvolution layer
 
     Arguments
@@ -313,15 +341,17 @@ def deconv(batch_input, out_channels):
         The input of the layer
     out_channels - int
         The amount of channels of the output layer
+    name (kwarg)- string
+        The variable-scope of these ops (default 'deconv')
 
     Returns
     -------
     tf.tensor - the output of the layer
     """
-    with tf.variable_scope('deconv'):
-        if a.init == 'xavier':
+    with tf.variable_scope(name):
+        if init == 'xavier':
             initial = CONV_INIT_XAVIER
-        elif a.init == 'small':
+        elif init == 'small':
             initial = tf.random_normal_initializer(default.CONV_INIT_MU,
                                                    default.CONV_INIT_STD_SMALL)
         else:
@@ -342,7 +372,7 @@ def deconv(batch_input, out_channels):
                                       [batch, in_height*2, in_width*2,
                                        out_channels],
                                       [1, 2, 2, 1], padding='SAME')
-        if a.use_bias:
+        if use_bias:
             biases = tf.get_variable('biases', [out_channels],
                                      initializer=default.CONV_BIAS_INIT)
             conv = tf.reshape(tf.nn.bias_add(conv, biases), conv.get_shape())
@@ -351,7 +381,7 @@ def deconv(batch_input, out_channels):
 
 
 # ==== Model functions
-def init_model(epoch_size):
+def init_model(epoch_size, *, opt=args):
     """Create data queue for training.
 
     Returns
@@ -359,7 +389,7 @@ def init_model(epoch_size):
     Examples named tuple - object containing the necessarily information of the
         queue
     """
-    if a.input_dir is None or not os.path.exists(a.input_dir):
+    if opt.input_dir is None or not os.path.exists(opt.input_dir):
         raise Exception('input_dir does not exist')
 
     with tf.name_scope('queue_fill'):
@@ -368,7 +398,7 @@ def init_model(epoch_size):
             paths = tf.placeholder(tf.string, shape=())
             input_data = tf.placeholder(tf.string, shape=())
             target_data = tf.placeholder(tf.string, shape=())
-            if a.between_lambda > 0:
+            if opt.between_lambda > 0:
                 between_data = tf.placeholder(tf.string, shape=())
                 between_iter = tf.placeholder(tf.int32, shape=())
             mask_data = tf.placeholder(tf.string, shape=())
@@ -381,7 +411,7 @@ def init_model(epoch_size):
         input_mask = preprocess(tf.image.decode_png(mask_data,
                                                     channels=IMG_SHAPE[2]),
                                 True)
-        if a.between_lambda > 0:
+        if opt.between_lambda > 0:
             between_image = preprocess(tf.image.decode_png(
                 between_data, channels=IMG_SHAPE[2]))
 
@@ -396,33 +426,33 @@ def init_model(epoch_size):
 
         else:
             # The tf queue that handles the reading of images
-            q = tf.FIFOQueue(QSIZE, [tf.string, tf.float32, tf.float32, tf.bool,
-                                     tf.int32],
+            q = tf.FIFOQueue(QSIZE, [tf.string, tf.float32, tf.float32,
+                                     tf.bool, tf.int32],
                              shapes=[[], IMG_SHAPE, IMG_SHAPE, IMG_SHAPE, []])
-            enqueue_op = q.enqueue([paths, input_image, target_image, input_mask,
-                                    iters])
-    if a.between_lambda > 0:
+            enqueue_op = q.enqueue([paths, input_image, target_image,
+                                    input_mask, iters])
+    if opt.between_lambda > 0:
         paths_batch, inputs_batch, targets_batch, masks_batch, iters_batch, \
-            *between_target = q.dequeue_many(a.batch_size)
+            *between_target = q.dequeue_many(opt.batch_size)
     else:
         paths_batch, inputs_batch, targets_batch, masks_batch, iters_batch = \
-            q.dequeue_many(a.batch_size)
-        between_target=None
+            q.dequeue_many(opt.batch_size)
+        between_target = None
 
-    steps_per_epoch = int(math.ceil(epoch_size / a.batch_size))
+    steps_per_epoch = int(math.ceil(epoch_size / opt.batch_size))
     examples = Examples(paths=paths_batch, inputs=inputs_batch,
                         targets=targets_batch, iters=iters_batch,
                         target_masks=masks_batch, count=epoch_size,
                         steps_per_epoch=steps_per_epoch,
                         between_target=between_target)
 
-    if a.baseline == 'pix2pix':
+    if opt.baseline == 'pix2pix':
         model = baselines.create_pix2pix_model(examples.inputs,
-                                               examples.targets)
-    elif a.baseline == 'projective':
+                                               examples.targets, opt=opt)
+    elif opt.baseline == 'projective':
         model = baselines.create_projective_model(examples.inputs,
                                                   examples.targets)
-    elif a.baseline == 'identity':
+    elif opt.baseline == 'identity':
         model = baselines.create_identity_model(examples.inputs,
                                                 examples.targets)
     else:
@@ -436,9 +466,13 @@ def init_model(epoch_size):
                 id, x, i = next(OBJECT_QUEUE)
                 rot = x*5
                 irot = (rot + i*5) % 360
-                input_file = DATA_FILE.format(dir=a.input_dir, id=id, rot=rot)
-                tgt_file = DATA_FILE.format(dir=a.input_dir, id=id, rot=irot)
-                mask_file = MASK_FILE.format(dir=a.input_dir, id=id, rot=irot)
+                input_file = DATA_FILE.format(dir=opt.input_dir, id=id,
+                                              rot=rot)
+                tgt_file = DATA_FILE.format(dir=opt.input_dir, id=id, rot=irot)
+                mask_file = MASK_FILE.format(dir=opt.input_dir, id=id,
+                                             rot=irot)
+                if not os.path.exists(mask_file):
+                    mask_file = os.path.join(opt.input_dir, 'MASK.png')
                 path = f'{id}_r{rot}-r{irot}.png'
                 with open(input_file, 'rb') as fi, open(tgt_file, 'rb') as ft,\
                         open(mask_file, 'rb') as fm:
@@ -459,10 +493,13 @@ def init_model(epoch_size):
                 rot = x*5
                 irot = (rot + i*5) % 360
                 brot = (rot + j*5) % 360
-                input_file = DATA_FILE.format(dir=a.input_dir, id=id, rot=rot)
-                tgt_file = DATA_FILE.format(dir=a.input_dir, id=id, rot=irot)
-                mask_file = MASK_FILE.format(dir=a.input_dir, id=id, rot=irot)
-                btwn_file = DATA_FILE.format(dir=a.input_dir, id=id, rot=brot)
+                input_file = DATA_FILE.format(dir=opt.input_dir, id=id,
+                                              rot=rot)
+                tgt_file = DATA_FILE.format(dir=opt.input_dir, id=id, rot=irot)
+                mask_file = MASK_FILE.format(dir=opt.input_dir, id=id,
+                                             rot=irot)
+                btwn_file = DATA_FILE.format(dir=opt.input_dir, id=id,
+                                             rot=brot)
                 path = f'{id}_r{rot}-r{irot}.png'
                 with open(input_file, 'rb') as fi, open(tgt_file, 'rb') as ft,\
                         open(mask_file, 'rb') as fm, \
@@ -478,12 +515,13 @@ def init_model(epoch_size):
                 print('WARNING load_queue stopped')
                 break
 
-    if a.between_lambda > 0:
+    if opt.between_lambda > 0:
         load_and_enqueue = load_and_enqueue_between
     return examples, model, load_and_enqueue
 
 
-def create_generator(generator_inputs, generator_outputs_channels):
+def create_generator(generator_inputs, generator_outputs_channels, *,
+                     opt=args):
     """Create the generator of pix2pix
 
     Arguments
@@ -501,17 +539,18 @@ def create_generator(generator_inputs, generator_outputs_channels):
 
     # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
     with tf.variable_scope('encoder_1'):
-        output = conv(generator_inputs, a.ngf, stride=2)
+        output = conv(generator_inputs, opt.ngf, stride=2, init=opt.init,
+                      use_bias=opt.use_bias)
         layers.append(output)
 
     layer_specs = [
-        (a.ngf * 2, True),  # e_2: [b, 128, 128, ngf] => [b, 64, 64, ngf * 2]
-        (a.ngf * 4, True),  # e_3: [b, 64, 64, ngf * 2] => [b, 32, 32, ngf * 4]
-        (a.ngf * 8, True),  # e_4: [b, 32, 32, ngf * 4] => [b, 16, 16, ngf * 8]
-        (a.ngf * 8, True),  # e_5: [b, 16, 16, ngf * 8] => [b, 8, 8, ngf * 8]
-        (a.ngf * 8, True),  # e_6: [b, 8, 8, ngf * 8] => [b, 4, 4, ngf * 8]
-        (a.ngf * 8, True),  # e_7: [b, 4, 4, ngf * 8] => [b, 2, 2, ngf * 8]
-        (a.ngf * 8, False)  # e_8: [b, 2, 2, ngf * 8] => [b, 1, 1, ngf * 8]
+        (opt.ngf * 2, True),  # e_2: [b, 128, 128, ngf] => [b, 64, 64, ngf * 2]
+        (opt.ngf * 4, True),  # e_3: [b, 64, 64, ngf * 2] => [b, 32, 32, ngf * 4]
+        (opt.ngf * 8, True),  # e_4: [b, 32, 32, ngf * 4] => [b, 16, 16, ngf * 8]
+        (opt.ngf * 8, True),  # e_5: [b, 16, 16, ngf * 8] => [b, 8, 8, ngf * 8]
+        (opt.ngf * 8, True),  # e_6: [b, 8, 8, ngf * 8] => [b, 4, 4, ngf * 8]
+        (opt.ngf * 8, True),  # e_7: [b, 4, 4, ngf * 8] => [b, 2, 2, ngf * 8]
+        (opt.ngf * 8, False)  # e_8: [b, 2, 2, ngf * 8] => [b, 1, 1, ngf * 8]
     ]
 
     for out_channels, do_bn in layer_specs:
@@ -519,7 +558,8 @@ def create_generator(generator_inputs, generator_outputs_channels):
             rectified = lrelu(layers[-1], default.GEN_LRELU)
             # [batch, in_height, in_width, in_channels] =>
             #  [batch, in_height/2, in_width/2, out_channels]
-            convolved = conv(rectified, out_channels, stride=2)
+            convolved = conv(rectified, out_channels, stride=2,
+                             init=opt.init, use_bias=opt.use_bias)
             if do_bn:
                 output = batchnorm(convolved)
             else:
@@ -527,13 +567,13 @@ def create_generator(generator_inputs, generator_outputs_channels):
             layers.append(output)
 
     layer_specs = [
-        (a.ngf * 8, default.GEN_DROPOUT), # d_8: [b, 1, 1, ngf*8] => [b, 2, 2, ngf*8*2]
-        (a.ngf * 8, default.GEN_DROPOUT), # d_7: [b, 2, 2, ngf*8*2] => [b, 4, 4, ngf*8*2]
-        (a.ngf * 8, default.GEN_DROPOUT), # d_6: [b, 4, 4, ngf*8*2] => [b, 8, 8, ngf*8*2]
-        (a.ngf * 8, 0.0),  # d_5: [b, 8, 8, ngf*8*2] => [b, 16, 16, ngf*8*2]
-        (a.ngf * 4, 0.0),  # d_4: [b, 16, 16, ngf*8*2] => [b, 32, 32, ngf*4*2]
-        (a.ngf * 2, 0.0),  # d_3: [b, 32, 32, ngf*4*2] => [b, 64, 64, ngf*2*2]
-        (a.ngf, 0.0),      # d_2: [b, 64, 64, ngf*2*2] => [b, 128, 128, ngf*2]
+        (opt.ngf * 8, default.GEN_DROPOUT),  # d_8: [b, 1, 1, ngf*8] => [b, 2, 2, ngf*8*2]
+        (opt.ngf * 8, default.GEN_DROPOUT),  # d_7: [b, 2, 2, ngf*8*2] => [b, 4, 4, ngf*8*2]
+        (opt.ngf * 8, default.GEN_DROPOUT),  # d_6: [b, 4, 4, ngf*8*2] => [b, 8, 8, ngf*8*2]
+        (opt.ngf * 8, 0.0),  # d_5: [b, 8, 8, ngf*8*2] => [b, 16, 16, ngf*8*2]
+        (opt.ngf * 4, 0.0),  # d_4: [b, 16, 16, ngf*8*2] => [b, 32, 32, ngf*4*2]
+        (opt.ngf * 2, 0.0),  # d_3: [b, 32, 32, ngf*4*2] => [b, 64, 64, ngf*2*2]
+        (opt.ngf, 0.0),      # d_2: [b, 64, 64, ngf*2*2] => [b, 128, 128, ngf*2]
     ]
 
     num_encoder_layers = len(layers)
@@ -550,7 +590,8 @@ def create_generator(generator_inputs, generator_outputs_channels):
             rectified = tf.nn.relu(input)
             # [batch, in_height, in_width, in_channels] =>
             #  [batch, in_height*2, in_width*2, out_channels]
-            output = deconv(rectified, out_channels)
+            output = deconv(rectified, out_channels, init=opt.init,
+                            use_bias=opt.use_bias)
             output = batchnorm(output)
 
             if dropout > 0.0:
@@ -570,7 +611,8 @@ def create_generator(generator_inputs, generator_outputs_channels):
     return layers[-1]
 
 
-def create_discriminator(discrim_inputs, discrim_targets=None, n_out=1):
+def create_discriminator(discrim_inputs, discrim_targets=None, *, opt=args,
+                         n_out=1):
     n_layers = 3
     layers = []
 
@@ -583,7 +625,8 @@ def create_discriminator(discrim_inputs, discrim_targets=None, n_out=1):
 
     # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
     with tf.variable_scope('layer_1'):
-        convolved = conv(input, a.ndf, stride=2)
+        convolved = conv(input, opt.ndf, stride=2, init=opt.init,
+                         use_bias=opt.use_bias)
         rectified = lrelu(convolved, default.DIS_LRELU)
         layers.append(rectified)
 
@@ -592,16 +635,18 @@ def create_discriminator(discrim_inputs, discrim_targets=None, n_out=1):
     # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
     for i in range(n_layers):
         with tf.variable_scope('layer_%d' % (len(layers) + 1)):
-            out_channels = a.ndf * min(2**(i+1), 8)
+            out_channels = opt.ndf * min(2**(i+1), 8)
             stride = 1 if i == n_layers - 1 else 2  # last has stride 1
-            convolved = conv(layers[-1], out_channels, stride=stride)
+            convolved = conv(layers[-1], out_channels, stride=stride,
+                             init=opt.init, use_bias=opt.use_bias)
             normalized = batchnorm(convolved)
             rectified = lrelu(normalized, default.DIS_LRELU)
             layers.append(rectified)
 
     # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
     with tf.variable_scope('layer_%d' % (len(layers) + 1)):
-        convolved = conv(rectified, out_channels=n_out, stride=1)
+        convolved = conv(rectified, out_channels=n_out, stride=1,
+                         init=opt.init, use_bias=opt.use_bias)
         if n_out == 1:
             output = tf.sigmoid(convolved)
         else:
@@ -611,8 +656,8 @@ def create_discriminator(discrim_inputs, discrim_targets=None, n_out=1):
     return layers[-1]
 
 
-def IterGAN(inputs, out_channels, iter_num, name='IterGAN'):
-    if a.batch_size != 1:
+def IterGAN(inputs, out_channels, iter_num, *, opt=args, name='IterGAN'):
+    if opt.batch_size != 1:
         print('WARNING, current code only works correctly with batch=1. (or if'
               ' the variable-iters are synchronised with the batch-size')
 
@@ -620,7 +665,7 @@ def IterGAN(inputs, out_channels, iter_num, name='IterGAN'):
         max_iter = tf.reduce_max(iter_num)
         with tf.variable_scope('generator'):
             def body(i, inp, iters):
-                out = create_generator(inp, out_channels)
+                out = create_generator(inp, out_channels, opt=opt)
                 next_iters = tf.concat([iters, out], axis=2,
                                        name='between_steps')
                 return i+1, out, next_iters
@@ -629,7 +674,7 @@ def IterGAN(inputs, out_channels, iter_num, name='IterGAN'):
                 return i < max_iter
 
             i0 = tf.constant(0)
-            it_shape = tf.TensorShape([a.batch_size, IMG_SHAPE[0], None,
+            it_shape = tf.TensorShape([opt.batch_size, IMG_SHAPE[0], None,
                                        IMG_SHAPE[2]])
             img_shape = inputs.get_shape()
             _, outputs, iters = tf.while_loop(
@@ -638,18 +683,19 @@ def IterGAN(inputs, out_channels, iter_num, name='IterGAN'):
     return outputs, iters, img_shape, max_iter
 
 
-def create_model(inputs, targets, target_masks, iter_num, between_target=None):
+def create_model(inputs, targets, target_masks, iter_num, *,
+                 opt=args, between_target=None):
     """Create the full model for training/testing
     """
     out_channels = int(targets.get_shape()[-1])
     assert out_channels == int(inputs.get_shape()[-1])
 
     outputs, iters, img_shape, max_iter = IterGAN(inputs, out_channels,
-                                                  iter_num)
+                                                  iter_num, opt=opt)
 
     rest = {}
 
-    if a.sample_lambda > 0.0:
+    if opt.sample_lambda > 0.0:
         with tf.name_scope('sample_steps'):
             i = tf.random_uniform((), maxval=max_iter, dtype=tf.int32)
             j = tf.random_uniform((), maxval=2, dtype=tf.int32)
@@ -660,9 +706,11 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
                 sample_fake.set_shape(img_shape)
             sample_real = real_imgs[j]
             with tf.variable_scope('disciminator_sample'):
-                predict_sample_real = create_discriminator(sample_real)
+                predict_sample_real = create_discriminator(sample_real,
+                                                           opt=opt)
             with tf.variable_scope('disciminator_sample', reuse=True):
-                predict_sample_fake = create_discriminator(sample_fake)
+                predict_sample_fake = create_discriminator(sample_fake,
+                                                           opt=opt)
             rest['sample'] = {'i': i,
                               'j': j,
                               'predict_real': predict_sample_real,
@@ -670,8 +718,9 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
                               'real_inp': sample_real,
                               'fake_inp': sample_fake
                               }
+            rest['Dis2'] = tf.reduce_mean(-tf.log(predict_sample_fake + EPS))
 
-    if a.between_lambda > 0.0:
+    if opt.between_lambda > 0.0:
         assert between_target is not None
         with tf.name_scope('between_steps'):
             i, sample_tgt = between_target
@@ -680,10 +729,12 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
             sample_fake = iters[:, :, (i+1)*d:(i+2)*d, :]
             sample_fake.set_shape(img_shape)
             with tf.variable_scope('disciminator_between'):
-                predict_between_real = create_discriminator(inputs, sample_tgt)
+                predict_between_real = create_discriminator(inputs, sample_tgt,
+                                                            opt=opt)
             with tf.variable_scope('disciminator_between', reuse=True):
                 predict_between_fake = create_discriminator(inputs,
-                                                            sample_fake)
+                                                            sample_fake,
+                                                            opt=opt)
             rest['between'] = {'i': i,
                                'predict_real': predict_between_real,
                                'predict_fake': predict_between_fake,
@@ -691,18 +742,19 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
                                     deprocess(sample_tgt), dtype=tf.uint8,
                                     saturate=True)
                                }
+            rest['Dis2'] = tf.reduce_mean(-tf.log(predict_between_fake + EPS))
 
     # create two copies of discriminator, one for real and one for fake pairs
     # they share the same underlying variables
     with tf.name_scope('real_discriminator'):
         with tf.variable_scope('discriminator'):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real = create_discriminator(inputs, targets)
+            predict_real = create_discriminator(inputs, targets, opt=opt)
 
     with tf.name_scope('fake_discriminator'):
         with tf.variable_scope('discriminator', reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake = create_discriminator(inputs, outputs)
+            predict_fake = create_discriminator(inputs, outputs, opt=opt)
 
     with tf.name_scope('discriminator_loss'):
         # minimizing -tf.log will try to get inputs to 1
@@ -710,12 +762,12 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
         # predict_fake => 0
         discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) +
                                       tf.log(1 - predict_fake + EPS)))
-        if a.sample_lambda > 0.0:
-            discim_loss = discrim_loss + a.sample_lambda * \
+        if opt.sample_lambda > 0.0:
+            discim_loss = discrim_loss + opt.sample_lambda * \
                 tf.reduce_mean(-(tf.log(predict_sample_real + EPS) +
                                tf.log(1 - predict_sample_fake + EPS)))
-        if a.between_lambda > 0.0:
-            discim_loss = discrim_loss + a.between_lambda * \
+        if opt.between_lambda > 0.0:
+            discim_loss = discrim_loss + opt.between_lambda * \
                 tf.reduce_mean(-(tf.log(predict_between_real + EPS) +
                                tf.log(1 - predict_between_fake + EPS)))
 
@@ -723,7 +775,7 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
         # predict_fake => 1
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
-        if a.mmad_loss:
+        if opt.mmad_loss:
             with tf.name_scope('MMAD'):
                 dif = tf.abs(targets - outputs, name='absdist')
                 temp = tf.reduce_mean(dif)
@@ -739,22 +791,22 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
                                        gen_loss_L1)
         else:
             gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
-        if a.sample_lambda > 0.0:
-            gen_loss = gen_loss + a.sample_lambda * \
+        gen_loss = gen_loss_GAN * opt.gan_weight + gen_loss_L1 * opt.l1_weight
+        if opt.sample_lambda > 0.0:
+            gen_loss = gen_loss + opt.sample_lambda * \
                 tf.reduce_mean(-tf.log(predict_sample_fake + EPS))
-        if a.between_lambda > 0.0:
-            gen_loss = gen_loss + a.between_lambda * \
+        if opt.between_lambda > 0.0:
+            gen_loss = gen_loss + opt.between_lambda * \
                 tf.reduce_mean(-tf.log(predict_between_fake + EPS))
 
     global_step = tf.contrib.framework.get_or_create_global_step()
     incr_global_step = tf.assign(global_step, global_step+1)
 
-    if a.mode in {'train'}:
+    if opt.mode in {'train'}:
         with tf.name_scope('discriminator_train'):
             discrim_tvars = [var for var in tf.trainable_variables()
                              if var.name.startswith('discriminator')]
-            discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            discrim_optim = tf.train.AdamOptimizer(opt.lr, opt.beta1)
             discrim_grads_and_vars = discrim_optim.compute_gradients(
                 discrim_loss, var_list=discrim_tvars)
             discrim_train = discrim_optim.apply_gradients(
@@ -764,7 +816,7 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
             with tf.control_dependencies([discrim_train]):
                 gen_tvars = [var for var in tf.trainable_variables()
                              if var.name.startswith('generator')]
-                gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+                gen_optim = tf.train.AdamOptimizer(opt.lr, opt.beta1)
                 gen_grads_and_vars = gen_optim.compute_gradients(
                     gen_loss, var_list=gen_tvars)
                 gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
@@ -803,11 +855,11 @@ def create_model(inputs, targets, target_masks, iter_num, between_target=None):
 
 
 # ==== Other functions
-def save_images(fetches, step=None, epoch=None):
+def save_images(fetches, *, opt=args, step=None, epoch=None):
     if epoch is None:
-        image_dir = os.path.join(a.output_dir, 'images')
+        image_dir = os.path.join(opt.output_dir, 'images')
     else:
-        image_dir = os.path.join(a.output_dir, f'epoch/e{epoch}')
+        image_dir = os.path.join(opt.output_dir, f'epoch/e{epoch}')
 
     if not os.path.exists(image_dir):
         os.makedirs(image_dir)
@@ -829,10 +881,10 @@ def save_images(fetches, step=None, epoch=None):
     return filesets
 
 
-def append_index(filesets, step=False):
-    if not os.path.exists(a.output_dir):
-        os.makedirs(a.output_dir)
-    index_path = os.path.join(a.output_dir, 'index.html')
+def append_index(filesets, *, opt=args, step=False):
+    if not os.path.exists(opt.output_dir):
+        os.makedirs(opt.output_dir)
+    index_path = os.path.join(opt.output_dir, 'index.html')
     if os.path.exists(index_path):
         index = open(index_path, 'a')
     else:
@@ -862,7 +914,7 @@ def append_index(filesets, step=False):
     return index_path
 
 
-def create_display_and_summary_ops(examples, model):
+def create_display_and_summary_ops(examples, model, *, opt=args):
     """Reverse any processing on images so they can be written to disk or
     displayed to user, and create tf summaries"""
     inputs = deprocess(examples.inputs)
@@ -894,9 +946,12 @@ def create_display_and_summary_ops(examples, model):
             'between': tf.map_fn(tf.image.encode_png, converted_between,
                                  dtype=tf.string, name='btwn_pngs'),
             'score': model.gen_loss_L1,
+            'Dis': model.gen_loss_GAN,
+            'Dis2': model.rest['Dis2'] if 'Dis2' in model.rest
+            else tf.constant(np.nan),
         }
-    if a.mode in {'test', 'validate'}:
-        qu = tf.FIFOQueue(32, [tf.string]*6, shapes=[(a.batch_size,)]*6)
+    if opt.mode in {'test', 'validate'}:
+        qu = tf.FIFOQueue(32, [tf.string]*6, shapes=[(opt.batch_size,)]*6)
         fetches_enq = qu.enqueue([
             display_fetches['paths'],
             display_fetches['inputs'],
@@ -928,7 +983,7 @@ def create_display_and_summary_ops(examples, model):
         fetches_enq = save_and_dequeue = None
 
     # The summaries
-    if a.sample_lambda > 0.0:
+    if opt.sample_lambda > 0.0:
         with tf.name_scope('sample_summary'):
             tf.summary.image('real_sample',
                              model.rest['sample']['predict_real'])
@@ -964,75 +1019,90 @@ def create_display_and_summary_ops(examples, model):
     for var in tf.trainable_variables():
         tf.summary.histogram(var.op.name + '/values', var)
 
-    if a.mode == 'train':
+    if opt.mode == 'train':
         for grad, var in model.discrim_grads_and_vars+model.gen_grads_and_vars:
             tf.summary.histogram(var.op.name + '/gradients', grad)
 
     return display_fetches, fetches_enq, save_and_dequeue
 
 
-def test(display_fetches, fetches_enq, max_steps, epoch_size, epoch=None):
+def test(display_fetches, fetches_enq, max_steps, epoch_size, *, opt=args,
+         epoch=None):
     global epoch_
     if epoch is not None:
         epoch_ = epoch
-    tmp = a.output_dir
+        edir = f'/epoch/e{epoch}'
+    else:
+        edir = ''
+    tmp = opt.output_dir
     max_steps = min(max_steps, epoch_size)
     t0 = time.time()
-    for dir in ['seen', 'unseen']:
+    for dir in (['seen'] if 'vkitti' in opt.datatype else ['seen', 'unseen']):
         scores = []
+        d_scores = []
+        d2_scores = []
         print(dir)
-        a.output_dir = os.path.join(tmp, dir)
+        opt.output_dir = os.path.join(tmp, dir)
         for step in range(max_steps):
-            _, results = sess.run((fetches_enq, display_fetches['score']))
+            _, results, d, d2 = sess.run(
+                (fetches_enq, display_fetches['score'], display_fetches['Dis'],
+                 display_fetches['Dis2']))
             scores.append(results)
-            if step % a.progress_freq == 0:
-                print(f'at {step}'+' '*10, end='\r')
-        with open(a.output_dir+'/score.npy', 'wb') as f:
+            d_scores.append(d)
+            d2_scores.append(d2)
+            if step % opt.progress_freq == 0:
+                print(f'at {step} with score {results:.2f}/{d:.3f}/{d2:.3f}' +
+                      ' '*10, end='\r')
+        with open(opt.output_dir+edir+'/score.npy', 'wb') as f:
             np.save(f, np.array(scores))
-        print('wrote index at', a.output_dir)
+        with open(opt.output_dir+edir+'/d_score.npy', 'wb') as f:
+            np.save(f, np.array(d_scores))
+        with open(opt.output_dir+edir+'/d2_score.npy', 'wb') as f:
+            np.save(f, np.array(d2_scores))
+        print('wrote index at', opt.output_dir)
 
 
-def main():
+def main(*, opt=args):
     global OBJECT_QUEUE, sess
     # --- Initialise main function
     if tf.__version__.split('.')[0] != '1':
         raise Exception('Tensorflow version 1 required')
 
-    if a.seed is None:
-        a.seed = random.randint(0, 2**31 - 1)
+    if opt.seed is None:
+        opt.seed = random.randint(0, 2**31 - 1)
 
-    tf.set_random_seed(a.seed)
-    np.random.seed(a.seed)
-    random.seed(a.seed)
+    tf.set_random_seed(opt.seed)
+    np.random.seed(opt.seed)
+    random.seed(opt.seed)
 
-    if not os.path.exists(os.path.join(a.output_dir, 'epoch')):
-        os.makedirs(os.path.join(a.output_dir, 'epoch'))
+    if not os.path.exists(os.path.join(opt.output_dir, 'epoch')):
+        os.makedirs(os.path.join(opt.output_dir, 'epoch'))
 
     # load some options from the checkpoint
-    if a.mode in {'test', 'validate'}:
-        if 'test' not in a.datatype:
-            a.datatype = 'basic_test'
-        if a.baseline not in {'projective', 'identity'}:
-            if a.checkpoint is None:
+    if opt.mode in {'test', 'validate'}:
+        if 'test' not in opt.datatype:
+            opt.datatype = 'basic_test'
+        if opt.baseline not in {'projective', 'identity'}:
+            if opt.checkpoint is None:
                 raise Exception('checkpoint required for test mode')
             options = {'ngf', 'ndf', 'sample_lambda', 'use_bias',
                        'between_lambda'}
-            if os.path.exists(os.path.join(a.checkpoint, 'options.json')):
-                with open(os.path.join(a.checkpoint, 'options.json')) as f:
+            if os.path.exists(os.path.join(opt.checkpoint, 'options.json')):
+                with open(os.path.join(opt.checkpoint, 'options.json')) as f:
                     for key, val in json.loads(f.read()).items():
                         if key in options:
                             print('loaded', key, '=', val)
-                            setattr(a, key, val)
+                            setattr(opt, key, val)
 
-    for k, v in a._get_kwargs():
+    for k, v in opt._get_kwargs():
         print(k, '=', v)
 
-    with open(os.path.join(a.output_dir, 'options.json'), 'w') as f:
-        f.write(json.dumps(vars(a), sort_keys=True, indent=4))
+    with open(os.path.join(opt.output_dir, 'options.json'), 'w') as f:
+        f.write(json.dumps(vars(opt), sort_keys=True, indent=4))
 
     # ---- Build model
     # inputs and targets are [batch_size, height, width, channels]
-    OBJECT_QUEUE, epoch_size = get_generator(a.datatype)
+    OBJECT_QUEUE, epoch_size = get_generator(opt.datatype, opt.max_epochs)
     examples, model, load_and_enqueue = init_model(epoch_size)
 
     print(f'examples count = {examples.count}')
@@ -1048,60 +1118,61 @@ def main():
     saver = tf.train.Saver(max_to_keep=1)
     epoch_saver = tf.train.Saver(max_to_keep=None)
 
-    logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
+    logdir = opt.output_dir if (opt.trace_freq > 0 or opt.summary_freq > 0) \
+        else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
 
     # don't horde the full gpu
     config = tf.ConfigProto()
-    if 0.0 < a.gpu_frac < 1.0:
-        config.gpu_options.per_process_gpu_memory_fraction = a.gpu_frac
-    elif a.gpu_frac < -0.5:
+    if 0.0 < opt.gpu_frac < 1.0:
+        config.gpu_options.per_process_gpu_memory_fraction = opt.gpu_frac
+    elif opt.gpu_frac < -0.5:
         config.gpu_options.allow_growth = True
 
     max_steps = default.MAX_STEPS
-    if a.max_epochs is not None:
-        max_steps = examples.steps_per_epoch * a.max_epochs
-    if a.max_steps is not None:
-        max_steps = a.max_steps
+    if opt.max_epochs is not None:
+        max_steps = examples.steps_per_epoch * opt.max_epochs
+    if opt.max_steps is not None:
+        max_steps = opt.max_steps
 
     # ---- start process
     with sv.managed_session(config=config) as sess:
-        if a.mode is not 'validate'and a.checkpoint is not None:
+        if opt.mode is not 'validate'and opt.checkpoint is not None:
             print('loading model from checkpoint')
-            checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+            checkpoint = tf.train.latest_checkpoint(opt.checkpoint)
             print(checkpoint)
             if checkpoint is None:
-                saver.restore(sess, a.checkpoint)
+                saver.restore(sess, opt.checkpoint)
             else:
                 saver.restore(sess, checkpoint)
 
-        if a.mode in {'train'}:
+        if opt.mode in {'train'}:
             for _ in range(sess.run(sv.global_step)):
                 next(OBJECT_QUEUE)
         t = threading.Thread(target=load_and_enqueue)
         t.start()
-        if a.mode in {'test', 'validate'}:
+        if opt.mode in {'test', 'validate'}:
             t2 = threading.Thread(target=save_and_dequeue)
             t2.start()
 
         print('parameter_count =', sess.run(parameter_count))
 
-        if a.mode == 'validate':
+        if opt.mode == 'validate':
             # validating, test for each checkpoint in the epoch folder
             checkpoints = [os.path.splitext(f)[0] for f in glob.glob(
-                os.path.join(a.checkpoint, 'epoch/model*.index'))]
+                os.path.join(opt.checkpoint, 'epoch/model*.index'))]
             checkpoints.sort(key=lambda x: int(x.split('-')[-1]))
             scores = np.zeros((3, len(checkpoints)))
-            tmp = a.output_dir
+            tmp = opt.output_dir
             for checkpoint in checkpoints:
-                a.output_dir = tmp
+                opt.output_dir = tmp
                 print(f'loading next checkpoint: {checkpoint}')
                 i = checkpoint.split('-')[-1]
                 saver.restore(sess, checkpoint)
                 test(display_fetches, fetch_enq, max_steps, epoch_size,
                      epoch=i)
             return
-        elif a.mode == 'test':
+        elif opt.mode == 'test':
             # testing
             test(display_fetches, fetch_enq, max_steps, epoch_size)
         else:
@@ -1115,7 +1186,7 @@ def main():
 
                 options = None
                 run_metadata = None
-                if should(a.trace_freq):
+                if should(opt.trace_freq):
                     options = tf.RunOptions(
                         trace_level=tf.RunOptions.FULL_TRACE)
                     run_metadata = tf.RunMetadata()
@@ -1125,48 +1196,48 @@ def main():
                     'global_step': sv.global_step,
                 }
 
-                if should(a.progress_freq):
+                if should(opt.progress_freq):
                     fetches['discrim_loss'] = model.discrim_loss
                     fetches['gen_loss_GAN'] = model.gen_loss_GAN
                     fetches['gen_loss_L1'] = model.gen_loss_L1
                     fetches['paths'] = examples.paths
 
-                if should(a.summary_freq):
+                if should(opt.summary_freq):
                     fetches['summary'] = sv.summary_op
 
-                if should(a.display_freq):
+                if should(opt.display_freq):
                     fetches['display'] = display_fetches
 
                 results = sess.run(fetches, options=options,
                                    run_metadata=run_metadata)
 
-                if should(a.summary_freq):
+                if should(opt.summary_freq):
                     print('recording summary')
                     sv.summary_writer.add_summary(results['summary'],
                                                   results['global_step'])
 
-                if should(a.display_freq):
+                if should(opt.display_freq):
                     print('saving display images')
                     filesets = save_images(results['display'],
                                            step=results['global_step'])
                     append_index(filesets, step=True)
 
-                if should(a.trace_freq):
+                if should(opt.trace_freq):
                     print('recording trace')
                     sv.summary_writer.add_run_metadata(
                         run_metadata, 'step_%d' % results['global_step'])
 
-                if should(a.progress_freq):
+                if should(opt.progress_freq):
                     # global_step will have the correct step count if we resume
                     # from a checkpoint.
                     train_epoch = math.ceil(results['global_step'] /
                                             examples.steps_per_epoch)
                     train_step = (results['global_step'] - 1) % \
                         examples.steps_per_epoch + 1
-                    rate = (step + 1 - start_step) * a.batch_size / \
+                    rate = (step + 1 - start_step) * opt.batch_size / \
                         (time.time() - start)
-                    remaining = (max_steps - step + start_step) * a.batch_size\
-                        / rate
+                    remaining = (max_steps - step + start_step) * \
+                        opt.batch_size / rate
                     print(f'progress  epoch {train_epoch}  step {train_step}  '
                           f'image/sec {rate:0.1f}  remaining {t_s(remaining)}')
 
@@ -1175,17 +1246,17 @@ def main():
                     print('gen_loss_L1', results['gen_loss_L1'])
                     print('paths', results['paths'])
 
-                if should(a.save_freq):
+                if should(opt.save_freq):
                     print('saving model')
-                    saver.save(sess, os.path.join(a.output_dir, 'model'),
+                    saver.save(sess, os.path.join(opt.output_dir, 'model'),
                                global_step=sv.global_step)
 
                 if step == 0 or \
                         (results['global_step'] / examples.steps_per_epoch) % \
-                        a.epoch_freq == 0:
+                        opt.epoch_freq == 0:
                     print('epoch save')
                     tmp = results['global_step'] // examples.steps_per_epoch
-                    epoch_saver.save(sess, os.path.join(a.output_dir,
+                    epoch_saver.save(sess, os.path.join(opt.output_dir,
                                                         'epoch/model'),
                                      global_step=tmp)
 
@@ -1203,5 +1274,6 @@ def t_s(sec):
 
 
 if __name__ == '__main__':
-    a = _build_parser().parse_args()
+    if 'vkitti' in args.datatype:
+        IMG_SHAPE = [256, 768, 3]
     main()

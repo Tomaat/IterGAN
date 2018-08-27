@@ -10,56 +10,59 @@
 import tensorflow as tf
 import numpy as np
 from scipy.linalg import svd
-import default
 
-from itergan import Model, a, EPS
+import default
+from itergan import Model, create_generator, create_discriminator
 
 import sys
 assert sys.version_info >= (3, 6), 'Please update your python!'
 
 
-def create_pix2pix_model(inputs, targets):
+def create_pix2pix_model(inputs, targets, *, opt=None):
+    assert opt is not None, 'not possible to call without explicit options'
     out_channels = int(targets.get_shape()[-1])
     assert out_channels == int(inputs.get_shape()[-1])
 
-    with tf.variable_scope('generator', reuse=bool(i)) as scope:
-        output = create_generator(inputs, out_channels)
+    with tf.variable_scope('generator') as scope:
+        outputs = create_generator(inputs, out_channels, opt=opt)
 
-    iters = [output]
+    iters = [outputs]
     # create two copies of discriminator, one for real and one for fake pairs
     # they share the same underlying variables
     with tf.name_scope('real_discriminator'):
         with tf.variable_scope('discriminator'):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real = create_discriminator(inputs, targets)
+            predict_real = create_discriminator(inputs, targets, opt=opt)
 
     with tf.name_scope('fake_discriminator'):
         with tf.variable_scope('discriminator', reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake = create_discriminator(inputs, outputs)
+            predict_fake = create_discriminator(inputs, outputs, opt=opt)
 
     with tf.name_scope('discriminator_loss'):
         # minimizing -tf.log will try to get inputs to 1
         # predict_real => 1
         # predict_fake => 0
-        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) +
-                                      tf.log(1 - predict_fake + EPS)))
+        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + default.EPS) +
+                                      tf.log(1 - predict_fake + default.EPS)))
 
     with tf.name_scope('generator_loss'):
         # predict_fake => 1
         # abs(targets - outputs) => 0
-        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + default.EPS))
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+        gen_loss = gen_loss_GAN * opt.gan_weight + gen_loss_L1 * \
+            opt.l1_weight
 
     global_step = tf.contrib.framework.get_or_create_global_step()
     incr_global_step = tf.assign(global_step, global_step+1)
 
-    if a.mode in {'train'}:
+    if opt.mode in {'train'}:
         with tf.name_scope('discriminator_train'):
             discrim_tvars = [var for var in tf.trainable_variables()
                              if var.name.startswith('discriminator')]
-            discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            discrim_optim = tf.train.AdamOptimizer(opt.lr,
+                                                   opt.beta1)
             discrim_grads_and_vars = discrim_optim.compute_gradients(
                 discrim_loss, var_list=discrim_tvars)
             discrim_train = discrim_optim.apply_gradients(
@@ -69,7 +72,8 @@ def create_pix2pix_model(inputs, targets):
             with tf.control_dependencies([discrim_train]):
                 gen_tvars = [var for var in tf.trainable_variables()
                              if var.name.startswith('generator')]
-                gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+                gen_optim = tf.train.AdamOptimizer(opt.lr,
+                                                   opt.beta1)
                 gen_grads_and_vars = gen_optim.compute_gradients(
                     gen_loss, var_list=gen_tvars)
                 gen_train = gen_optim.apply_gradients(gen_grads_and_vars)

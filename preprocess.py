@@ -18,6 +18,7 @@ assert sys.version_info >= (3, 6), 'Please update your python!'
 QSIZE = 32
 
 IMAGE_ID = ((id, x) for id in range(1, 1001, 1) for x in range(0, 72, 1))
+
 TOT = 72000
 RAW_SHAPE = [288, 384, 3]
 IMG_SHAPE = [256, 256, 3]
@@ -143,12 +144,93 @@ def init(input_dir, output_dir, mask=False):
     return enqueue_out, q_out.close(), load_and_enqueue, save_and_dequeue
 
 
-def main(input_dir, mask=False):
+def init_v(input_dir, output_dir):
+    """Create data queue for training.
+
+    Returns
+    -------
+    Examples named tuple - object containing the necessarily information of the
+        queue
+    """
+    if input_dir is None or not os.path.exists(input_dir):
+        raise Exception('input_dir does not exist')
+
+    with tf.name_scope('input_queue'):
+        # The image placeholders
+        with tf.name_scope('file_inputs'):
+            paths = tf.placeholder(tf.string, shape=())
+            input_data = tf.placeholder(tf.string, shape=())
+
+        input_image = preprocess(tf.image.decode_png(input_data, channels=3))
+        # The tf queue that handles the reading of images
+        q_in = tf.FIFOQueue(QSIZE, [tf.string, tf.float32],
+                            shapes=[[], RAW_SHAPE])
+        enqueue_op = q_in.enqueue([paths, input_image])
+        queue_close = q_in.close()
+
+    with tf.name_scope('process'):
+        out_path, raw_image = q_in.dequeue()
+        with tf.variable_scope('resize'):
+            image = tf.image.resize_images(raw_image[:, 58:-59, :], [256, 768])
+        img = tf.image.convert_image_dtype(image, dtype=tf.uint8,
+                                           saturate=True)
+        output_data = tf.image.encode_png(img)
+        q_out = tf.FIFOQueue(QSIZE, [tf.string, tf.string],
+                             shapes=[[], []])
+        enqueue_out = q_out.enqueue([out_path, output_data])
+
+    with tf.name_scope('output_queue'):
+        dequeue_op = q_out.dequeue()
+
+    def load_and_enqueue():
+        mask_path = os.path.dirname(output_dir)+'/MASK.png'
+        white_png = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x04\xda\x00\x00\x01w\x08\x00\x00\x00\x00VZy\x01\x00\x00\x04\xe0IDATx\x9c\xed\xd4\xc1\t\x00 \x10\xc00u\xff\x9d\xcf%\x04\xa1$\x13\xf4\xd5=\x0b\xa0\xe6\xfc\x0e\x00x\xcf\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80 k\x03\x82\xac\r\x08\xb26 \xc8\xda\x80\xa0\x0b\x03S\x03\xedZU\x80\x04\x00\x00\x00\x00IEND\xaeB`\x82'
+        sess.run(enqueue_op, feed_dict={paths: mask_path,
+                                        input_data: white_png})
+        for scene in [1, 2, 6, 18, 20]:
+            scene_path = os.path.join(
+                input_dir, f'vkitti_1.3.1_rgb/vkitti_1.3.1_rgb/{scene:04d}/')
+            max_id = len(os.listdir(scene_path+'clone'))
+            for r, p in [(0, '30-deg-left'), (15, '15-deg-left'),
+                         (30, 'clone'), (45, '15-deg-right'),
+                         (60, '30-deg-right')]:
+                for id in range(max_id):
+                    input_file = scene_path+f'{p}/{id:05d}.png'
+                    idx = scene*1000+id
+                    path = f'{output_dir}/{idx}/{idx}_r{r}.png'
+                    print(f'at {path}', end='\r')
+                    with open(input_file, 'rb') as fi:
+                        sess.run(enqueue_op, feed_dict={paths: path,
+                                                        input_data: fi.read()})
+        raise tf.errors.CancelledError
+
+    def save_and_dequeue():
+        while True:
+            try:
+                out_path, img_data = sess.run(dequeue_op)
+                dir = os.path.dirname(out_path)
+                if not os.path.exists(dir):
+                    os.makedirs(dir)
+                with open(out_path, 'wb') as fo:
+                    fo.write(img_data)
+            except (tf.errors.CancelledError, RuntimeError):
+                print('WARNING load_queue stopped')
+                break
+
+    return enqueue_out, q_out.close(), load_and_enqueue, save_and_dequeue
+
+
+def main(input_dir, mask=False, vkitti=False):
     global sess
-    output_dir = f'{input_dir}aloi_preprocessed/'+('mask' if mask else 'img')
-    enqueue, queue_close, load_and_enqueue, save_and_dequeue = init(input_dir,
-                                                                    output_dir,
-                                                                    mask)
+    if vkitti:
+        output_dir = os.path.join(input_dir, 'vkitti_preprocessed/img')
+        enqueue, queue_close, load_and_enqueue, save_and_dequeue = \
+            init_v(input_dir, output_dir)
+    else:
+        output_dir = os.path.join(input_dir, 'aloi_preprocessed/' +
+                                  ('mask' if mask else 'img'))
+        enqueue, queue_close, load_and_enqueue, save_and_dequeue = \
+            init(input_dir, output_dir, mask)
 
     sv = tf.train.Supervisor(logdir=None, save_summaries_secs=0, saver=None)
 
@@ -174,17 +256,26 @@ def main(input_dir, mask=False):
 
 def error():
     print('Please use as follows\n> python preprocess.py <aloi_dir>, to proces'
-          's the colour data, and\n> python preprocess.py <aloi_dir> mask, to '
-          'process the binary masks')
+          's the aloi colour data, \n> python preprocess.py <aloi_dir> mask, t'
+          'o process the binary masks, and\n python preprocess.py <vkitti_dir>'
+          ' vkitti, to process the vkitti data')
     sys.exit(1)
 
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         error()
-    tmp1 = os.path.join(sys.argv[1], 'aloi_red2_view')
-    tmp2 = os.path.join(sys.argv[1], 'aloi_red2_view')
-    if not (os.path.isdir(tmp1) or os.path.isdir(tmp2)):
-        error()
-    mask = 'mask' in {s.lower() for s in sys.argv}
-    main(sys.argv[1], mask)
+    args = {s.lower() for s in sys.argv}
+    if 'vkitti' in args:
+        RAW_SHAPE = [375, 1242, 3]
+        tmp1 = os.path.join(sys.argv[1], 'vkitti_1.3.1_rgb/vkitti_1.3.1_rgb')
+        if not os.path.isdir(tmp1):
+            error()
+        main(sys.argv[1], vkitti=True)
+    else:
+        tmp1 = os.path.join(sys.argv[1], 'aloi_red2_view')
+        tmp2 = os.path.join(sys.argv[1], 'aloi_mask2')
+        if not (os.path.isdir(tmp1) or os.path.isdir(tmp2)):
+            error()
+        mask = 'mask' in args
+        main(sys.argv[1], mask)
